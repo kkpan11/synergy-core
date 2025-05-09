@@ -81,8 +81,12 @@ void EiEventQueueBuffer::waitForEvent(double timeout_in_ms)
     // and potentially testCancel
     if (pfds[PIPEFD].revents & POLLIN) {
       char buf[64];
-      auto result = read(pipe_r_, buf, sizeof(buf)); // discard
-      LOG_DEBUG2("event queue read result: %d", result);
+      ssize_t total = 0;
+      ssize_t result;
+      while ((result = read(pipe_r_, buf, sizeof(buf)) > 0)) {
+        total += result;
+      }
+      LOG_DEBUG2("event queue read result: %d (total drained: %zd)", result, total);
     }
   }
   Thread::testCancel();
@@ -113,7 +117,7 @@ IEventQueueBuffer::Type EiEventQueueBuffer::getEvent(Event &event, uint32_t &dat
     return kUser;
   }
 
-  event = Event(Event::kSystem, events_->getSystemTarget());
+  event = Event(EventTypes::System, events_->getSystemTarget());
 
   return kSystem;
 }

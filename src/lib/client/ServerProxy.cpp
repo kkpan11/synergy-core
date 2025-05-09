@@ -15,7 +15,6 @@
 #include "deskflow/AppUtil.h"
 #include "deskflow/Clipboard.h"
 #include "deskflow/ClipboardChunk.h"
-#include "deskflow/FileChunk.h"
 #include "deskflow/OptionTypes.h"
 #include "deskflow/ProtocolTypes.h"
 #include "deskflow/ProtocolUtil.h"
@@ -56,12 +55,12 @@ ServerProxy::ServerProxy(Client *client, deskflow::IStream *stream, IEventQueue 
 
   // handle data on stream
   m_events->adoptHandler(
-      m_events->forIStream().inputReady(), m_stream->getEventTarget(),
+      EventTypes::StreamInputReady, m_stream->getEventTarget(),
       new TMethodEventJob<ServerProxy>(this, &ServerProxy::handleData)
   );
 
   m_events->adoptHandler(
-      m_events->forClipboard().clipboardSending(), this,
+      EventTypes::ClipboardSending, this,
       new TMethodEventJob<ServerProxy>(this, &ServerProxy::handleClipboardSendingEvent)
   );
 
@@ -72,20 +71,21 @@ ServerProxy::ServerProxy(Client *client, deskflow::IStream *stream, IEventQueue 
 ServerProxy::~ServerProxy()
 {
   setKeepAliveRate(-1.0);
-  m_events->removeHandler(m_events->forIStream().inputReady(), m_stream->getEventTarget());
+  m_events->removeHandler(EventTypes::StreamInputReady, m_stream->getEventTarget());
 }
 
 void ServerProxy::resetKeepAliveAlarm()
 {
   if (m_keepAliveAlarmTimer != nullptr) {
-    m_events->removeHandler(Event::kTimer, m_keepAliveAlarmTimer);
+    m_events->removeHandler(EventTypes::Timer, m_keepAliveAlarmTimer);
     m_events->deleteTimer(m_keepAliveAlarmTimer);
     m_keepAliveAlarmTimer = nullptr;
   }
   if (m_keepAliveAlarm > 0.0) {
     m_keepAliveAlarmTimer = m_events->newOneShotTimer(m_keepAliveAlarm, nullptr);
     m_events->adoptHandler(
-        Event::kTimer, m_keepAliveAlarmTimer, new TMethodEventJob<ServerProxy>(this, &ServerProxy::handleKeepAliveAlarm)
+        EventTypes::Timer, m_keepAliveAlarmTimer,
+        new TMethodEventJob<ServerProxy>(this, &ServerProxy::handleKeepAliveAlarm)
     );
   }
 }
@@ -313,11 +313,7 @@ ServerProxy::EResult ServerProxy::parseMessage(const uint8_t *code)
     setOptions();
   }
 
-  else if (memcmp(code, kMsgDFileTransfer, 4) == 0) {
-    fileChunkReceived();
-  } else if (memcmp(code, kMsgDDragInfo, 4) == 0) {
-    dragInfoReceived();
-  } else if (memcmp(code, kMsgDSecureInputNotification, 4) == 0) {
+  else if (memcmp(code, kMsgDSecureInputNotification, 4) == 0) {
     secureInputNotification();
   }
 
@@ -817,44 +813,9 @@ void ServerProxy::infoAcknowledgment()
   m_ignoreMouse = false;
 }
 
-void ServerProxy::fileChunkReceived()
-{
-  int result = FileChunk::assemble(m_stream, m_client->getReceivedFileData(), m_client->getExpectedFileSize());
-
-  if (result == kFinish) {
-    m_events->addEvent(Event(m_events->forFile().fileReceiveCompleted(), m_client));
-  } else if (result == kStart) {
-    if (m_client->getDragFileList().size() > 0) {
-      std::string filename = m_client->getDragFileList().at(0).getFilename();
-      LOG((CLOG_DEBUG "start receiving %s", filename.c_str()));
-    }
-  }
-}
-
-void ServerProxy::dragInfoReceived()
-{
-  // parse
-  uint32_t fileNum = 0;
-  std::string content;
-  ProtocolUtil::readf(m_stream, kMsgDDragInfo + 4, &fileNum, &content);
-
-  m_client->dragInfoReceived(fileNum, content);
-}
-
 void ServerProxy::handleClipboardSendingEvent(const Event &event, void *)
 {
   ClipboardChunk::send(m_stream, event.getDataObject());
-}
-
-void ServerProxy::fileChunkSending(uint8_t mark, char *data, size_t dataSize)
-{
-  FileChunk::send(m_stream, mark, data, dataSize);
-}
-
-void ServerProxy::sendDragInfo(uint32_t fileCount, const char *info, size_t size)
-{
-  std::string data(info, size);
-  ProtocolUtil::writef(m_stream, kMsgDDragInfo, fileCount, &data);
 }
 
 void ServerProxy::secureInputNotification()

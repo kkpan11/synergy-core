@@ -6,7 +6,6 @@
 # Platform Specific Code
 if(WIN32)
   set(PLATFORM_CODE
-    win32/ArchConsoleWindows.cpp
     win32/ArchConsoleWindows.h
     win32/ArchDaemonWindows.cpp
     win32/ArchDaemonWindows.h
@@ -30,7 +29,6 @@ if(WIN32)
 
 elseif(UNIX)
   set(PLATFORM_CODE
-    unix/ArchConsoleUnix.cpp
     unix/ArchConsoleUnix.h
     unix/ArchDaemonUnix.cpp
     unix/ArchDaemonUnix.h

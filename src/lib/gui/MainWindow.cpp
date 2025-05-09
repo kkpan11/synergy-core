@@ -289,7 +289,9 @@ void MainWindow::connectSlots()
   connect(&m_coreProcess, &CoreProcess::processStateChanged, this, &MainWindow::coreProcessStateChanged);
   connect(&m_coreProcess, &CoreProcess::connectionStateChanged, this, &MainWindow::coreConnectionStateChanged);
   connect(&m_coreProcess, &CoreProcess::secureSocket, this, &MainWindow::secureSocket);
-  connect(&m_coreProcess, &CoreProcess::daemonIpcClientConnectFailed, this, &MainWindow::daemonIpcClientConnectFailed);
+  connect(
+      &m_coreProcess, &CoreProcess::daemonIpcClientConnectionFailed, this, &MainWindow::daemonIpcClientConnectionFailed
+  );
 
   connect(m_actionAbout, &QAction::triggered, this, &MainWindow::openAboutDialog);
   connect(m_actionClearSettings, &QAction::triggered, this, &MainWindow::clearSettings);
@@ -1012,24 +1014,15 @@ void MainWindow::updateLocalFingerprint()
   m_btnFingerprint->setVisible(tlsEnabled && QFile::exists(Settings::tlsLocalDb()));
 }
 
-void MainWindow::autoAddScreen(const QString name)
+void MainWindow::autoAddScreen(const QString &name)
 {
+  if (name.isEmpty())
+    return;
 
-  int r = m_serverConfig.autoAddScreen(name);
-  if (r != kAutoAddScreenOk) {
-    switch (r) {
-    case kAutoAddScreenManualServer:
-      showConfigureServer(
-          tr("Please add the server (%1) to the grid.").arg(Settings::value(Settings::Core::ScreenName).toString())
-      );
-      break;
-
-    case kAutoAddScreenManualClient:
-      showConfigureServer(
-          tr("Please add the server (%1) to the grid.").arg(Settings::value(Settings::Core::ScreenName).toString())
-      );
-      break;
-    }
+  if (m_serverConfig.autoAddScreen(name) == kAutoAddScreenManualClient) {
+    showConfigureServer(
+        tr("Please add the client (%1) to the grid.").arg(Settings::value(Settings::Core::ScreenName).toString())
+    );
   }
 }
 
@@ -1145,7 +1138,7 @@ bool MainWindow::regenerateLocalFingerprints()
   return true;
 }
 
-void MainWindow::daemonIpcClientConnectFailed()
+void MainWindow::daemonIpcClientConnectionFailed()
 {
   if (deskflow::gui::messages::showDaemonOffline(this)) {
     m_coreProcess.retryDaemon();
@@ -1161,7 +1154,7 @@ void MainWindow::toggleCanRunCore(bool enableButtons)
   m_actionStopCore->setEnabled(enableButtons);
 }
 
-void MainWindow::remoteHostChanged(const QString newRemoteHost)
+void MainWindow::remoteHostChanged(const QString &newRemoteHost)
 {
   m_coreProcess.setAddress(newRemoteHost);
   toggleCanRunCore(!newRemoteHost.isEmpty() && ui->rbModeClient->isChecked());

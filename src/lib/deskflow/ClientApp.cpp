@@ -46,7 +46,7 @@
 #if WINAPI_CARBON
 #include "base/TMethodJob.h"
 #include "mt/Thread.h"
-#include "platform/OSXDragSimulator.h"
+#include "platform/OSXCocoaApp.h"
 #include "platform/OSXScreen.h"
 #endif
 
@@ -65,10 +65,6 @@ ClientApp::ClientApp(IEventQueue *events)
       m_client(nullptr),
       m_clientScreen(nullptr),
       m_serverAddress(nullptr)
-{
-}
-
-ClientApp::~ClientApp()
 {
 }
 
@@ -242,15 +238,14 @@ double ClientApp::nextRestartTimeout()
 void ClientApp::handleScreenError(const Event &, void *)
 {
   LOG((CLOG_CRIT "error on screen"));
-  m_events->addEvent(Event(Event::kQuit));
+  m_events->addEvent(Event(EventTypes::Quit));
 }
 
 deskflow::Screen *ClientApp::openClientScreen()
 {
   deskflow::Screen *screen = createScreen();
-  screen->setEnableDragDrop(argsBase().m_enableDragDrop);
   m_events->adoptHandler(
-      m_events->forIScreen().error(), screen->getEventTarget(),
+      EventTypes::ScreenError, screen->getEventTarget(),
       new TMethodEventJob<ClientApp>(this, &ClientApp::handleScreenError)
   );
   return screen;
@@ -259,7 +254,7 @@ deskflow::Screen *ClientApp::openClientScreen()
 void ClientApp::closeClientScreen(deskflow::Screen *screen)
 {
   if (screen != nullptr) {
-    m_events->removeHandler(m_events->forIScreen().error(), screen->getEventTarget());
+    m_events->removeHandler(EventTypes::ScreenError, screen->getEventTarget());
     delete screen;
   }
 }
@@ -269,7 +264,7 @@ void ClientApp::handleClientRestart(const Event &, void *vtimer)
   // discard old timer
   auto *timer = static_cast<EventQueueTimer *>(vtimer);
   m_events->deleteTimer(timer);
-  m_events->removeHandler(Event::kTimer, timer);
+  m_events->removeHandler(EventTypes::Timer, timer);
 
   // reconnect
   startClient();
@@ -281,7 +276,7 @@ void ClientApp::scheduleClientRestart(double retryTime)
   LOG((CLOG_DEBUG "retry in %.0f seconds", retryTime));
   EventQueueTimer *timer = m_events->newOneShotTimer(retryTime, nullptr);
   m_events->adoptHandler(
-      Event::kTimer, timer, new TMethodEventJob<ClientApp>(this, &ClientApp::handleClientRestart, timer)
+      EventTypes::Timer, timer, new TMethodEventJob<ClientApp>(this, &ClientApp::handleClientRestart, timer)
   );
 }
 
@@ -315,7 +310,7 @@ void ClientApp::handleClientRefused(const Event &e, void *)
   updateStatus(std::string("Failed to connect to server: ") + info->m_what);
   if (!args().m_restartable || !info->m_retry) {
     LOG((CLOG_ERR "failed to connect to server: %s", info->m_what.c_str()));
-    m_events->addEvent(Event(Event::kQuit));
+    m_events->addEvent(Event(EventTypes::Quit));
   } else {
     LOG((CLOG_WARN "failed to connect to server: %s", info->m_what.c_str()));
     if (!m_suspended) {
@@ -328,7 +323,7 @@ void ClientApp::handleClientDisconnected(const Event &, void *)
 {
   LOG((CLOG_NOTE "disconnected from server"));
   if (!args().m_restartable) {
-    m_events->addEvent(Event(Event::kQuit));
+    m_events->addEvent(Event(EventTypes::Quit));
   } else if (!m_suspended) {
     scheduleClientRestart(nextRestartTimeout());
   }
@@ -341,22 +336,22 @@ Client *ClientApp::openClient(const std::string &name, const NetworkAddress &add
 
   try {
     m_events->adoptHandler(
-        m_events->forClient().connected(), client->getEventTarget(),
+        EventTypes::ClientConnected, client->getEventTarget(),
         new TMethodEventJob<ClientApp>(this, &ClientApp::handleClientConnected)
     );
 
     m_events->adoptHandler(
-        m_events->forClient().connectionFailed(), client->getEventTarget(),
+        EventTypes::ClientConnectionFailed, client->getEventTarget(),
         new TMethodEventJob<ClientApp>(this, &ClientApp::handleClientFailed)
     );
 
     m_events->adoptHandler(
-        m_events->forClient().connectionRefused(), client->getEventTarget(),
+        EventTypes::ClientConnectionRefused, client->getEventTarget(),
         new TMethodEventJob<ClientApp>(this, &ClientApp::handleClientRefused)
     );
 
     m_events->adoptHandler(
-        m_events->forClient().disconnected(), client->getEventTarget(),
+        EventTypes::ClientDisconnected, client->getEventTarget(),
         new TMethodEventJob<ClientApp>(this, &ClientApp::handleClientDisconnected)
     );
 
@@ -374,10 +369,10 @@ void ClientApp::closeClient(Client *client)
     return;
   }
 
-  m_events->removeHandler(m_events->forClient().connected(), client);
-  m_events->removeHandler(m_events->forClient().connectionFailed(), client);
-  m_events->removeHandler(m_events->forClient().connectionRefused(), client);
-  m_events->removeHandler(m_events->forClient().disconnected(), client);
+  m_events->removeHandler(EventTypes::ClientConnected, client);
+  m_events->removeHandler(EventTypes::ClientConnectionFailed, client);
+  m_events->removeHandler(EventTypes::ClientConnectionRefused, client);
+  m_events->removeHandler(EventTypes::ClientDisconnected, client);
   delete client;
 }
 

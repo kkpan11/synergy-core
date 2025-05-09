@@ -13,8 +13,6 @@
 #include "base/TMethodEventJob.h"
 #include "base/TMethodJob.h"
 #include "deskflow/AppUtil.h"
-#include "deskflow/DropHelper.h"
-#include "deskflow/FileChunk.h"
 #include "deskflow/IPlatformScreen.h"
 #include "deskflow/OptionTypes.h"
 #include "deskflow/PacketStreamFilter.h"
@@ -46,8 +44,7 @@ Server::Server(
     ServerConfig &config, PrimaryClient *primaryClient, deskflow::Screen *screen, IEventQueue *events,
     deskflow::ServerArgs const &args
 )
-    : m_mock(false),
-      m_primaryClient(primaryClient),
+    : m_primaryClient(primaryClient),
       m_active(primaryClient),
       m_seqNum(0),
       m_xDelta(0),
@@ -73,14 +70,9 @@ Server::Server(
       m_lockedToScreen(false),
       m_screen(screen),
       m_events(events),
-      m_sendFileThread(nullptr),
-      m_writeToDropDirThread(nullptr),
-      m_ignoreFileTransfer(false),
       m_disableLockToScreen(false),
       m_enableClipboard(true),
       m_maximumClipboardSize(INT_MAX),
-      m_sendDragInfoThread(nullptr),
-      m_waitDragInfoThread(true),
       m_args(args)
 {
   // must have a primary client and it must have a canonical name
@@ -103,80 +95,67 @@ Server::Server(
   }
 
   // install event handlers
-  m_events->adoptHandler(Event::kTimer, this, new TMethodEventJob<Server>(this, &Server::handleSwitchWaitTimeout));
+  m_events->adoptHandler(EventTypes::Timer, this, new TMethodEventJob<Server>(this, &Server::handleSwitchWaitTimeout));
   m_events->adoptHandler(
-      m_events->forIKeyState().keyDown(), m_inputFilter, new TMethodEventJob<Server>(this, &Server::handleKeyDownEvent)
+      EventTypes::KeyStateKeyDown, m_inputFilter, new TMethodEventJob<Server>(this, &Server::handleKeyDownEvent)
   );
   m_events->adoptHandler(
-      m_events->forIKeyState().keyUp(), m_inputFilter, new TMethodEventJob<Server>(this, &Server::handleKeyUpEvent)
+      EventTypes::KeyStateKeyUp, m_inputFilter, new TMethodEventJob<Server>(this, &Server::handleKeyUpEvent)
   );
   m_events->adoptHandler(
-      m_events->forIKeyState().keyRepeat(), m_inputFilter,
-      new TMethodEventJob<Server>(this, &Server::handleKeyRepeatEvent)
+      EventTypes::KeyStateKeyRepeat, m_inputFilter, new TMethodEventJob<Server>(this, &Server::handleKeyRepeatEvent)
   );
   m_events->adoptHandler(
-      m_events->forIPrimaryScreen().buttonDown(), m_inputFilter,
+      EventTypes::PrimaryScreenButtonDown, m_inputFilter,
       new TMethodEventJob<Server>(this, &Server::handleButtonDownEvent)
   );
   m_events->adoptHandler(
-      m_events->forIPrimaryScreen().buttonUp(), m_inputFilter,
-      new TMethodEventJob<Server>(this, &Server::handleButtonUpEvent)
+      EventTypes::PrimaryScreenButtonUp, m_inputFilter, new TMethodEventJob<Server>(this, &Server::handleButtonUpEvent)
   );
   m_events->adoptHandler(
-      m_events->forIPrimaryScreen().motionOnPrimary(), m_primaryClient->getEventTarget(),
+      EventTypes::PrimaryScreenMotionOnPrimary, m_primaryClient->getEventTarget(),
       new TMethodEventJob<Server>(this, &Server::handleMotionPrimaryEvent)
   );
   m_events->adoptHandler(
-      m_events->forIPrimaryScreen().motionOnSecondary(), m_primaryClient->getEventTarget(),
+      EventTypes::PrimaryScreenMotionOnSecondary, m_primaryClient->getEventTarget(),
       new TMethodEventJob<Server>(this, &Server::handleMotionSecondaryEvent)
   );
   m_events->adoptHandler(
-      m_events->forIPrimaryScreen().wheel(), m_primaryClient->getEventTarget(),
+      EventTypes::PrimaryScreenWheel, m_primaryClient->getEventTarget(),
       new TMethodEventJob<Server>(this, &Server::handleWheelEvent)
   );
   m_events->adoptHandler(
-      m_events->forIPrimaryScreen().screensaverActivated(), m_primaryClient->getEventTarget(),
+      EventTypes::PrimaryScreenSaverActivated, m_primaryClient->getEventTarget(),
       new TMethodEventJob<Server>(this, &Server::handleScreensaverActivatedEvent)
   );
   m_events->adoptHandler(
-      m_events->forIPrimaryScreen().screensaverDeactivated(), m_primaryClient->getEventTarget(),
+      EventTypes::PrimaryScreenSaverDeactivated, m_primaryClient->getEventTarget(),
       new TMethodEventJob<Server>(this, &Server::handleScreensaverDeactivatedEvent)
   );
   m_events->adoptHandler(
-      m_events->forServer().switchToScreen(), m_inputFilter,
+      EventTypes::ServerSwitchToScreen, m_inputFilter,
       new TMethodEventJob<Server>(this, &Server::handleSwitchToScreenEvent)
   );
   m_events->adoptHandler(
-      m_events->forServer().switchInDirection(), m_inputFilter,
+      EventTypes::ServerSwitchInDirection, m_inputFilter,
       new TMethodEventJob<Server>(this, &Server::handleSwitchInDirectionEvent)
   );
   m_events->adoptHandler(
-      m_events->forServer().keyboardBroadcast(), m_inputFilter,
+      EventTypes::ServerKeyboardBroadcast, m_inputFilter,
       new TMethodEventJob<Server>(this, &Server::handleKeyboardBroadcastEvent)
   );
   m_events->adoptHandler(
-      m_events->forServer().lockCursorToScreen(), m_inputFilter,
+      EventTypes::ServerLockCursorToScreen, m_inputFilter,
       new TMethodEventJob<Server>(this, &Server::handleLockCursorToScreenEvent)
   );
   m_events->adoptHandler(
-      m_events->forIPrimaryScreen().fakeInputBegin(), m_inputFilter,
+      EventTypes::PrimaryScreenFakeInputBegin, m_inputFilter,
       new TMethodEventJob<Server>(this, &Server::handleFakeInputBeginEvent)
   );
   m_events->adoptHandler(
-      m_events->forIPrimaryScreen().fakeInputEnd(), m_inputFilter,
+      EventTypes::PrimaryScreenFakeInputEnd, m_inputFilter,
       new TMethodEventJob<Server>(this, &Server::handleFakeInputEndEvent)
   );
-
-  if (m_args.m_enableDragDrop) {
-    m_events->adoptHandler(
-        m_events->forFile().fileChunkSending(), this,
-        new TMethodEventJob<Server>(this, &Server::handleFileChunkSendingEvent)
-    );
-    m_events->adoptHandler(
-        m_events->forFile().fileReceiveCompleted(), this,
-        new TMethodEventJob<Server>(this, &Server::handleFileReceiveCompletedEvent)
-    );
-  }
 
   // add connection
   addClient(m_primaryClient);
@@ -198,24 +177,20 @@ Server::Server(
 
 Server::~Server()
 {
-  if (m_mock) {
-    return;
-  }
-
   // remove event handlers and timers
-  m_events->removeHandler(m_events->forIKeyState().keyDown(), m_inputFilter);
-  m_events->removeHandler(m_events->forIKeyState().keyUp(), m_inputFilter);
-  m_events->removeHandler(m_events->forIKeyState().keyRepeat(), m_inputFilter);
-  m_events->removeHandler(m_events->forIPrimaryScreen().buttonDown(), m_inputFilter);
-  m_events->removeHandler(m_events->forIPrimaryScreen().buttonUp(), m_inputFilter);
-  m_events->removeHandler(m_events->forIPrimaryScreen().motionOnPrimary(), m_primaryClient->getEventTarget());
-  m_events->removeHandler(m_events->forIPrimaryScreen().motionOnSecondary(), m_primaryClient->getEventTarget());
-  m_events->removeHandler(m_events->forIPrimaryScreen().wheel(), m_primaryClient->getEventTarget());
-  m_events->removeHandler(m_events->forIPrimaryScreen().screensaverActivated(), m_primaryClient->getEventTarget());
-  m_events->removeHandler(m_events->forIPrimaryScreen().screensaverDeactivated(), m_primaryClient->getEventTarget());
-  m_events->removeHandler(m_events->forIPrimaryScreen().fakeInputBegin(), m_inputFilter);
-  m_events->removeHandler(m_events->forIPrimaryScreen().fakeInputEnd(), m_inputFilter);
-  m_events->removeHandler(Event::kTimer, this);
+  m_events->removeHandler(EventTypes::KeyStateKeyDown, m_inputFilter);
+  m_events->removeHandler(EventTypes::KeyStateKeyUp, m_inputFilter);
+  m_events->removeHandler(EventTypes::KeyStateKeyRepeat, m_inputFilter);
+  m_events->removeHandler(EventTypes::PrimaryScreenButtonDown, m_inputFilter);
+  m_events->removeHandler(EventTypes::PrimaryScreenButtonUp, m_inputFilter);
+  m_events->removeHandler(EventTypes::PrimaryScreenMotionOnPrimary, m_primaryClient->getEventTarget());
+  m_events->removeHandler(EventTypes::PrimaryScreenMotionOnSecondary, m_primaryClient->getEventTarget());
+  m_events->removeHandler(EventTypes::PrimaryScreenWheel, m_primaryClient->getEventTarget());
+  m_events->removeHandler(EventTypes::PrimaryScreenSaverActivated, m_primaryClient->getEventTarget());
+  m_events->removeHandler(EventTypes::PrimaryScreenSaverDeactivated, m_primaryClient->getEventTarget());
+  m_events->removeHandler(EventTypes::PrimaryScreenFakeInputBegin, m_inputFilter);
+  m_events->removeHandler(EventTypes::PrimaryScreenFakeInputEnd, m_inputFilter);
+  m_events->removeHandler(EventTypes::Timer, this);
   stopSwitch();
 
   try {
@@ -228,8 +203,8 @@ Server::~Server()
   for (auto index = m_oldClients.begin(); index != m_oldClients.end(); ++index) {
     BaseClientProxy *client = index->first;
     m_events->deleteTimer(index->second);
-    m_events->removeHandler(Event::kTimer, client);
-    m_events->removeHandler(m_events->forClientProxy().disconnected(), client);
+    m_events->removeHandler(EventTypes::Timer, client);
+    m_events->removeHandler(EventTypes::ClientProxyDisconnected, client);
     delete client;
   }
 
@@ -287,7 +262,7 @@ void Server::adoptClient(BaseClientProxy *client)
 
   // watch for client disconnection
   m_events->adoptHandler(
-      m_events->forClientProxy().disconnected(), client,
+      EventTypes::ClientProxyDisconnected, client,
       new TMethodEventJob<Server>(this, &Server::handleClientDisconnected, client)
   );
 
@@ -317,7 +292,7 @@ void Server::adoptClient(BaseClientProxy *client)
 
   // send notification
   auto *info = new Server::ScreenConnectedInfo(getName(client));
-  m_events->addEvent(Event(m_events->forServer().connected(), m_primaryClient->getEventTarget(), info));
+  m_events->addEvent(Event(EventTypes::ServerConnected, m_primaryClient->getEventTarget(), info));
 }
 
 void Server::disconnect()
@@ -327,7 +302,7 @@ void Server::disconnect()
     Config emptyConfig(m_events);
     closeClients(emptyConfig);
   } else {
-    m_events->addEvent(Event(m_events->forServer().disconnected(), this));
+    m_events->addEvent(Event(EventTypes::ServerDisconnected, this));
   }
 }
 
@@ -526,7 +501,7 @@ void Server::switchScreen(BaseClientProxy *dst, int32_t x, int32_t y, bool forSc
     }
 
     Server::SwitchToScreenInfo *info = Server::SwitchToScreenInfo::alloc(m_active->getName());
-    m_events->addEvent(Event(m_events->forServer().screenSwitched(), this, info));
+    m_events->addEvent(Event(EventTypes::ServerScreenSwitched, this, info));
   } else {
     m_active->mouseMove(x, y);
   }
@@ -1447,16 +1422,6 @@ void Server::handleFakeInputEndEvent(const Event &, void *)
   m_primaryClient->fakeInputEnd();
 }
 
-void Server::handleFileChunkSendingEvent(const Event &event, void *)
-{
-  onFileChunkSending(event.getDataObject());
-}
-
-void Server::handleFileReceiveCompletedEvent(const Event &event, void *)
-{
-  onFileReceiveCompleted();
-}
-
 void Server::onClipboardChanged(BaseClientProxy *sender, ClipboardID id, uint32_t seqNum)
 {
   ClipboardInfo &clipboard = m_clipboards[id];
@@ -1619,9 +1584,6 @@ void Server::onMouseDown(ButtonID id)
 
   // relay
   m_active->mouseDown(id);
-
-  // reset this variable back to default value true
-  m_waitDragInfoThread = true;
 }
 
 void Server::onMouseUp(ButtonID id)
@@ -1631,23 +1593,6 @@ void Server::onMouseUp(ButtonID id)
 
   // relay
   m_active->mouseUp(id);
-
-  if (m_ignoreFileTransfer) {
-    m_ignoreFileTransfer = false;
-    return;
-  }
-
-  if (m_args.m_enableDragDrop) {
-    if (!m_screen->isOnScreen()) {
-      std::string &file = m_screen->getDraggingFilename();
-      if (!file.empty()) {
-        sendFileToClient(file.c_str());
-      }
-    }
-
-    // always clear dragging filename
-    m_screen->clearDraggingFilename();
-  }
 }
 
 bool Server::onMouseMovePrimary(int32_t x, int32_t y)
@@ -1730,64 +1675,13 @@ bool Server::onMouseMovePrimary(int32_t x, int32_t y)
 
     // should we switch or not?
     if (isSwitchOkay(newScreen, dir, x, y, xc, yc)) {
-      if (m_args.m_enableDragDrop && m_screen->isDraggingStarted() && m_active != newScreen && m_waitDragInfoThread) {
-        if (!m_sendDragInfoThread) {
-          m_sendDragInfoThread.reset(new Thread(new TMethodJob<Server>(this, &Server::sendDragInfoThread, newScreen)));
-        }
-
-        return false;
-      }
-
       // switch screen
       switchScreen(newScreen, x, y, false);
-      m_waitDragInfoThread = true;
       return true;
     }
   }
 
   return false;
-}
-
-void Server::sendDragInfoThread(void *arg)
-{
-  auto *newScreen = static_cast<BaseClientProxy *>(arg);
-
-  m_dragFileList.clear();
-  std::string &dragFileList = m_screen->getDraggingFilename();
-  if (!dragFileList.empty()) {
-    DragInformation di;
-    di.setFilename(dragFileList);
-    m_dragFileList.push_back(di);
-  }
-
-#if defined(__APPLE__)
-  // on mac it seems that after faking a LMB up, system would signal back
-  // to deskflow a mouse up event, which doesn't happen on windows. as a
-  // result, deskflow would send dragging file to client twice. This variable
-  // is used to ignore the first file sending.
-  m_ignoreFileTransfer = true;
-#endif
-
-  // send drag file info to client if there is any
-  if (m_dragFileList.size() > 0) {
-    sendDragInfo(newScreen);
-    m_dragFileList.clear();
-  }
-  m_waitDragInfoThread = false;
-  m_sendDragInfoThread.reset(nullptr);
-}
-
-void Server::sendDragInfo(BaseClientProxy *newScreen)
-{
-  std::string infoString;
-  uint32_t fileCount = DragInformation::setupDragInfo(m_dragFileList, infoString);
-
-  if (fileCount > 0) {
-    LOG((CLOG_DEBUG2 "sending drag information to client"));
-    LOG((CLOG_DEBUG3 "dragging file list: %s", infoString.c_str()));
-    LOG((CLOG_DEBUG3 "dragging file list string size: %i", infoString.size()));
-    newScreen->sendDragInfo(fileCount, infoString.c_str(), infoString.size());
-  }
 }
 
 void Server::onMouseMoveSecondary(int32_t dx, int32_t dy)
@@ -1928,11 +1822,6 @@ void Server::onMouseMoveSecondary(int32_t dx, int32_t dy)
   } while (false);
 
   if (jump) {
-    if (m_sendFileThread) {
-      StreamChunker::interruptFile();
-      m_sendFileThread.reset(nullptr);
-    }
-
     int32_t newX = m_x;
     int32_t newY = m_y;
 
@@ -1974,36 +1863,6 @@ void Server::onMouseWheel(int32_t xDelta, int32_t yDelta)
   m_active->mouseWheel(xDelta, yDelta);
 }
 
-void Server::onFileChunkSending(const void *data)
-{
-  auto *chunk = static_cast<FileChunk *>(const_cast<void *>(data));
-
-  LOG((CLOG_DEBUG1 "sending file chunk"));
-  assert(m_active != nullptr);
-
-  // relay
-  m_active->fileChunkSending(chunk->m_chunk[0], &chunk->m_chunk[1], chunk->m_dataSize);
-}
-
-void Server::onFileReceiveCompleted()
-{
-  if (isReceivedFileSizeValid()) {
-    auto method = new TMethodJob<Server>(this, &Server::writeToDropDirThread);
-    m_writeToDropDirThread.reset(new Thread(method));
-  }
-}
-
-void Server::writeToDropDirThread(void *)
-{
-  LOG((CLOG_DEBUG "starting write to drop dir thread"));
-
-  while (m_screen->isFakeDraggingStarted()) {
-    ARCH->sleep(.1f);
-  }
-
-  DropHelper::writeToDir(m_screen->getDropTarget(), m_fakeDragFileList, m_receivedFileData);
-}
-
 bool Server::addClient(BaseClientProxy *client)
 {
   std::string name = getName(client);
@@ -2013,15 +1872,15 @@ bool Server::addClient(BaseClientProxy *client)
 
   // add event handlers
   m_events->adoptHandler(
-      m_events->forIScreen().shapeChanged(), client->getEventTarget(),
+      EventTypes::ScreenShapeChanged, client->getEventTarget(),
       new TMethodEventJob<Server>(this, &Server::handleShapeChanged, client)
   );
   m_events->adoptHandler(
-      m_events->forClipboard().clipboardGrabbed(), client->getEventTarget(),
+      EventTypes::ClipboardGrabbed, client->getEventTarget(),
       new TMethodEventJob<Server>(this, &Server::handleClipboardGrabbed, client)
   );
   m_events->adoptHandler(
-      m_events->forClipboard().clipboardChanged(), client->getEventTarget(),
+      EventTypes::ClipboardChanged, client->getEventTarget(),
       new TMethodEventJob<Server>(this, &Server::handleClipboardChanged, client)
   );
 
@@ -2049,9 +1908,9 @@ bool Server::removeClient(BaseClientProxy *client)
   }
 
   // remove event handlers
-  m_events->removeHandler(m_events->forIScreen().shapeChanged(), client->getEventTarget());
-  m_events->removeHandler(m_events->forClipboard().clipboardGrabbed(), client->getEventTarget());
-  m_events->removeHandler(m_events->forClipboard().clipboardChanged(), client->getEventTarget());
+  m_events->removeHandler(EventTypes::ScreenShapeChanged, client->getEventTarget());
+  m_events->removeHandler(EventTypes::ClipboardGrabbed, client->getEventTarget());
+  m_events->removeHandler(EventTypes::ClipboardChanged, client->getEventTarget());
 
   // remove from list
   m_clients.erase(getName(client));
@@ -2083,7 +1942,7 @@ void Server::closeClient(BaseClientProxy *client, const char *msg)
   double timeout = 5.0;
   EventQueueTimer *timer = m_events->newOneShotTimer(timeout, nullptr);
   m_events->adoptHandler(
-      Event::kTimer, timer, new TMethodEventJob<Server>(this, &Server::handleClientCloseTimeout, client)
+      EventTypes::Timer, timer, new TMethodEventJob<Server>(this, &Server::handleClientCloseTimeout, client)
   );
 
   // move client to closing list
@@ -2122,9 +1981,9 @@ void Server::removeActiveClient(BaseClientProxy *client)
 {
   if (removeClient(client)) {
     forceLeaveClient(client);
-    m_events->removeHandler(m_events->forClientProxy().disconnected(), client);
+    m_events->removeHandler(EventTypes::ClientProxyDisconnected, client);
     if (m_clients.size() == 1 && m_oldClients.empty()) {
-      m_events->addEvent(Event(m_events->forServer().disconnected(), this));
+      m_events->addEvent(Event(EventTypes::ServerDisconnected, this));
     }
   }
 }
@@ -2133,12 +1992,12 @@ void Server::removeOldClient(BaseClientProxy *client)
 {
   OldClients::iterator i = m_oldClients.find(client);
   if (i != m_oldClients.end()) {
-    m_events->removeHandler(m_events->forClientProxy().disconnected(), client);
-    m_events->removeHandler(Event::kTimer, i->second);
+    m_events->removeHandler(EventTypes::ClientProxyDisconnected, client);
+    m_events->removeHandler(EventTypes::Timer, i->second);
     m_events->deleteTimer(i->second);
     m_oldClients.erase(i);
     if (m_clients.size() == 1 && m_oldClients.empty()) {
-      m_events->addEvent(Event(m_events->forServer().disconnected(), this));
+      m_events->addEvent(Event(EventTypes::ServerDisconnected, this));
     }
   }
 }
@@ -2243,45 +2102,4 @@ Server::KeyboardBroadcastInfo *Server::KeyboardBroadcastInfo::alloc(State state,
   info->m_state = state;
   std::copy(screens.c_str(), screens.c_str() + screens.size() + 1, info->m_screens);
   return info;
-}
-
-bool Server::isReceivedFileSizeValid()
-{
-  return m_expectedFileSize == m_receivedFileData.size();
-}
-
-void Server::sendFileToClient(const char *filename)
-{
-  if (m_sendFileThread != nullptr) {
-    StreamChunker::interruptFile();
-  }
-
-  auto data = static_cast<void *>(const_cast<char *>(filename));
-  auto method = new TMethodJob<Server>(this, &Server::sendFileThread, data);
-  m_sendFileThread.reset(new Thread(method));
-}
-
-void Server::sendFileThread(void *data)
-{
-  try {
-    auto *filename = static_cast<char *>(data);
-    LOG((CLOG_DEBUG "sending file to client, filename=%s", filename));
-    StreamChunker::sendFile(filename, m_events, this);
-  } catch (std::runtime_error &error) {
-    LOG((CLOG_ERR "failed sending file chunks, error: %s", error.what()));
-  }
-
-  m_sendFileThread.reset(nullptr);
-}
-
-void Server::dragInfoReceived(uint32_t fileNum, std::string content)
-{
-  if (!m_args.m_enableDragDrop) {
-    LOG((CLOG_DEBUG "drag drop not enabled, ignoring drag info."));
-    return;
-  }
-
-  DragInformation::parseDragInfo(m_fakeDragFileList, fileNum, content);
-
-  m_screen->startDraggingFiles(m_fakeDragFileList);
 }

@@ -27,13 +27,7 @@ public:
   \c name is the name of the server and \p screen is primary screen.
   */
   PrimaryClient(const std::string &name, deskflow::Screen *screen);
-  ~PrimaryClient() override;
-
-#ifdef TEST_ENV
-  PrimaryClient() : BaseClientProxy("")
-  {
-  }
-#endif
+  ~PrimaryClient() override = default;
 
   //! @name manipulators
   //@{

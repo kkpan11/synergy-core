@@ -15,8 +15,6 @@
 #include "base/TMethodJob.h"
 #include "client/ServerProxy.h"
 #include "deskflow/AppUtil.h"
-#include "deskflow/DropHelper.h"
-#include "deskflow/FileChunk.h"
 #include "deskflow/IPlatformScreen.h"
 #include "deskflow/PacketStreamFilter.h"
 #include "deskflow/ProtocolTypes.h"
@@ -63,8 +61,6 @@ Client::Client(
       m_suspended(false),
       m_connectOnResume(false),
       m_events(events),
-      m_sendFileThread(nullptr),
-      m_writeToDropDirThread(nullptr),
       m_useSecureNetwork(args.m_enableCrypto),
       m_args(args),
       m_enableClipboard(true),
@@ -75,21 +71,11 @@ Client::Client(
 
   // register suspend/resume event handlers
   m_events->adoptHandler(
-      m_events->forIScreen().suspend(), getEventTarget(), new TMethodEventJob<Client>(this, &Client::handleSuspend)
+      EventTypes::ScreenSuspend, getEventTarget(), new TMethodEventJob<Client>(this, &Client::handleSuspend)
   );
   m_events->adoptHandler(
-      m_events->forIScreen().resume(), getEventTarget(), new TMethodEventJob<Client>(this, &Client::handleResume)
+      EventTypes::ScreenResume, getEventTarget(), new TMethodEventJob<Client>(this, &Client::handleResume)
   );
-
-  if (m_args.m_enableDragDrop) {
-    m_events->adoptHandler(
-        m_events->forFile().fileChunkSending(), this, new TMethodEventJob<Client>(this, &Client::handleFileChunkSending)
-    );
-    m_events->adoptHandler(
-        m_events->forFile().fileReceiveCompleted(), this,
-        new TMethodEventJob<Client>(this, &Client::handleFileReceiveCompleted)
-    );
-  }
 
   m_pHelloBack = std::make_unique<HelloBack>(std::make_shared<HelloBack::Deps>(
       [this]() {
@@ -111,8 +97,8 @@ Client::~Client()
     return;
   }
 
-  m_events->removeHandler(m_events->forIScreen().suspend(), getEventTarget());
-  m_events->removeHandler(m_events->forIScreen().resume(), getEventTarget());
+  m_events->removeHandler(EventTypes::ScreenSuspend, getEventTarget());
+  m_events->removeHandler(EventTypes::ScreenResume, getEventTarget());
 
   cleanupTimer();
   cleanupScreen();
@@ -179,7 +165,7 @@ void Client::disconnect(const char *msg)
   if (msg) {
     sendConnectionFailedEvent(msg);
   } else {
-    sendEvent(m_events->forClient().disconnected(), nullptr);
+    sendEvent(EventTypes::ClientDisconnected, nullptr);
   }
 }
 
@@ -190,7 +176,7 @@ void Client::refuseConnection(const char *msg)
   if (msg) {
     auto info = new FailInfo(msg);
     info->m_retry = true;
-    Event event(m_events->forClient().connectionRefused(), getEventTarget(), info, Event::kDontFreeData);
+    Event event(EventTypes::ClientConnectionRefused, getEventTarget(), info, Event::kDontFreeData);
     m_events->addEvent(event);
   }
 }
@@ -199,7 +185,7 @@ void Client::handshakeComplete()
 {
   m_ready = true;
   m_screen->enable();
-  sendEvent(m_events->forClient().connected(), nullptr);
+  sendEvent(EventTypes::ClientConnected, nullptr);
 }
 
 bool Client::isConnected() const
@@ -242,11 +228,6 @@ void Client::enter(int32_t xAbs, int32_t yAbs, uint32_t, KeyModifierMask mask, b
   m_active = true;
   m_screen->mouseMove(xAbs, yAbs);
   m_screen->enter(mask);
-
-  if (m_sendFileThread) {
-    StreamChunker::interruptFile();
-    m_sendFileThread.reset(nullptr);
-  }
 }
 
 bool Client::leave()
@@ -410,7 +391,7 @@ void Client::sendClipboard(ClipboardID id)
   }
 }
 
-void Client::sendEvent(Event::Type type, void *data)
+void Client::sendEvent(EventTypes type, void *data)
 {
   m_events->addEvent(Event(type, getEventTarget(), data));
 }
@@ -419,18 +400,8 @@ void Client::sendConnectionFailedEvent(const char *msg)
 {
   auto *info = new FailInfo(msg);
   info->m_retry = true;
-  Event event(m_events->forClient().connectionFailed(), getEventTarget(), info, Event::kDontFreeData);
+  Event event(EventTypes::ClientConnectionFailed, getEventTarget(), info, Event::kDontFreeData);
   m_events->addEvent(event);
-}
-
-void Client::sendFileChunk(const void *data)
-{
-  auto *chunk = static_cast<FileChunk *>(const_cast<void *>(data));
-  LOG((CLOG_DEBUG1 "send file chunk"));
-  assert(m_server != nullptr);
-
-  // relay
-  m_server->fileChunkSending(chunk->m_chunk[0], &chunk->m_chunk[1], chunk->m_dataSize);
 }
 
 void Client::setupConnecting()
@@ -439,18 +410,18 @@ void Client::setupConnecting()
 
   if (m_args.m_enableCrypto) {
     m_events->adoptHandler(
-        m_events->forIDataSocket().secureConnected(), m_stream->getEventTarget(),
+        EventTypes::DataSocketSecureConnected, m_stream->getEventTarget(),
         new TMethodEventJob<Client>(this, &Client::handleConnected)
     );
   } else {
     m_events->adoptHandler(
-        m_events->forIDataSocket().connected(), m_stream->getEventTarget(),
+        EventTypes::DataSocketConnected, m_stream->getEventTarget(),
         new TMethodEventJob<Client>(this, &Client::handleConnected)
     );
   }
 
   m_events->adoptHandler(
-      m_events->forIDataSocket().connectionFailed(), m_stream->getEventTarget(),
+      EventTypes::DataSocketConnectionFailed, m_stream->getEventTarget(),
       new TMethodEventJob<Client>(this, &Client::handleConnectionFailed)
   );
 }
@@ -460,28 +431,27 @@ void Client::setupConnection()
   assert(m_stream != nullptr);
 
   m_events->adoptHandler(
-      m_events->forISocket().disconnected(), m_stream->getEventTarget(),
+      EventTypes::SocketDisconnected, m_stream->getEventTarget(),
       new TMethodEventJob<Client>(this, &Client::handleDisconnected)
   );
   m_events->adoptHandler(
-      m_events->forIStream().inputReady(), m_stream->getEventTarget(),
-      new TMethodEventJob<Client>(this, &Client::handleHello)
+      EventTypes::StreamInputReady, m_stream->getEventTarget(), new TMethodEventJob<Client>(this, &Client::handleHello)
   );
   m_events->adoptHandler(
-      m_events->forIStream().outputError(), m_stream->getEventTarget(),
+      EventTypes::StreamOutputError, m_stream->getEventTarget(),
       new TMethodEventJob<Client>(this, &Client::handleOutputError)
   );
   m_events->adoptHandler(
-      m_events->forIStream().inputShutdown(), m_stream->getEventTarget(),
+      EventTypes::StreamInputShutdown, m_stream->getEventTarget(),
       new TMethodEventJob<Client>(this, &Client::handleDisconnected)
   );
   m_events->adoptHandler(
-      m_events->forIStream().outputShutdown(), m_stream->getEventTarget(),
+      EventTypes::StreamOutputShutdown, m_stream->getEventTarget(),
       new TMethodEventJob<Client>(this, &Client::handleDisconnected)
   );
 
   m_events->adoptHandler(
-      m_events->forISocket().stopRetry(), m_stream->getEventTarget(),
+      EventTypes::SocketStopRetry, m_stream->getEventTarget(),
       new TMethodEventJob<Client>(this, &Client::handleStopRetry)
   );
 }
@@ -493,12 +463,10 @@ void Client::setupScreen()
   m_ready = false;
   m_server = new ServerProxy(this, m_stream, m_events);
   m_events->adoptHandler(
-      m_events->forIScreen().shapeChanged(), getEventTarget(),
-      new TMethodEventJob<Client>(this, &Client::handleShapeChanged)
+      EventTypes::ScreenShapeChanged, getEventTarget(), new TMethodEventJob<Client>(this, &Client::handleShapeChanged)
   );
   m_events->adoptHandler(
-      m_events->forClipboard().clipboardGrabbed(), getEventTarget(),
-      new TMethodEventJob<Client>(this, &Client::handleClipboardGrabbed)
+      EventTypes::ClipboardGrabbed, getEventTarget(), new TMethodEventJob<Client>(this, &Client::handleClipboardGrabbed)
   );
 }
 
@@ -506,7 +474,7 @@ void Client::setupTimer()
 {
   assert(m_timer == nullptr);
   m_timer = m_events->newOneShotTimer(2.0, nullptr);
-  m_events->adoptHandler(Event::kTimer, m_timer, new TMethodEventJob<Client>(this, &Client::handleConnectTimeout));
+  m_events->adoptHandler(EventTypes::Timer, m_timer, new TMethodEventJob<Client>(this, &Client::handleConnectTimeout));
 }
 
 void Client::cleanup()
@@ -521,20 +489,20 @@ void Client::cleanup()
 void Client::cleanupConnecting()
 {
   if (m_stream != nullptr) {
-    m_events->removeHandler(m_events->forIDataSocket().connected(), m_stream->getEventTarget());
-    m_events->removeHandler(m_events->forIDataSocket().connectionFailed(), m_stream->getEventTarget());
+    m_events->removeHandler(EventTypes::DataSocketConnected, m_stream->getEventTarget());
+    m_events->removeHandler(EventTypes::DataSocketConnectionFailed, m_stream->getEventTarget());
   }
 }
 
 void Client::cleanupConnection()
 {
   if (m_stream != nullptr) {
-    m_events->removeHandler(m_events->forIStream().inputReady(), m_stream->getEventTarget());
-    m_events->removeHandler(m_events->forIStream().outputError(), m_stream->getEventTarget());
-    m_events->removeHandler(m_events->forIStream().inputShutdown(), m_stream->getEventTarget());
-    m_events->removeHandler(m_events->forIStream().outputShutdown(), m_stream->getEventTarget());
-    m_events->removeHandler(m_events->forISocket().disconnected(), m_stream->getEventTarget());
-    m_events->removeHandler(m_events->forISocket().stopRetry(), m_stream->getEventTarget());
+    m_events->removeHandler(EventTypes::StreamInputReady, m_stream->getEventTarget());
+    m_events->removeHandler(EventTypes::StreamOutputError, m_stream->getEventTarget());
+    m_events->removeHandler(EventTypes::StreamInputShutdown, m_stream->getEventTarget());
+    m_events->removeHandler(EventTypes::StreamOutputShutdown, m_stream->getEventTarget());
+    m_events->removeHandler(EventTypes::SocketDisconnected, m_stream->getEventTarget());
+    m_events->removeHandler(EventTypes::SocketStopRetry, m_stream->getEventTarget());
     cleanupStream();
   }
 }
@@ -546,8 +514,8 @@ void Client::cleanupScreen()
       m_screen->disable();
       m_ready = false;
     }
-    m_events->removeHandler(m_events->forIScreen().shapeChanged(), getEventTarget());
-    m_events->removeHandler(m_events->forClipboard().clipboardGrabbed(), getEventTarget());
+    m_events->removeHandler(EventTypes::ScreenShapeChanged, getEventTarget());
+    m_events->removeHandler(EventTypes::ClipboardGrabbed, getEventTarget());
     delete m_server;
     m_server = nullptr;
   }
@@ -556,7 +524,7 @@ void Client::cleanupScreen()
 void Client::cleanupTimer()
 {
   if (m_timer != nullptr) {
-    m_events->removeHandler(Event::kTimer, m_timer);
+    m_events->removeHandler(EventTypes::Timer, m_timer);
     m_events->deleteTimer(m_timer);
     m_timer = nullptr;
   }
@@ -610,7 +578,7 @@ void Client::handleOutputError(const Event &, void *)
   cleanupScreen();
   cleanupConnection();
   LOG((CLOG_WARN "error sending to server"));
-  sendEvent(m_events->forClient().disconnected(), nullptr);
+  sendEvent(EventTypes::ClientDisconnected, nullptr);
 }
 
 void Client::handleDisconnected(const Event &, void *)
@@ -619,7 +587,7 @@ void Client::handleDisconnected(const Event &, void *)
   cleanupScreen();
   cleanupConnection();
   LOG((CLOG_DEBUG1 "disconnected"));
-  sendEvent(m_events->forClient().disconnected(), nullptr);
+  sendEvent(EventTypes::ClientDisconnected, nullptr);
 }
 
 void Client::handleShapeChanged(const Event &, void *)
@@ -663,7 +631,7 @@ void Client::handleHello(const Event &, void *)
   // receive another event for already pending messages so we fake
   // one.
   if (m_stream->isReady()) {
-    m_events->addEvent(Event(m_events->forIStream().inputReady(), m_stream->getEventTarget()));
+    m_events->addEvent(Event(EventTypes::StreamInputReady, m_stream->getEventTarget()));
   }
 }
 
@@ -690,24 +658,6 @@ void Client::handleResume(const Event &, void *)
   }
 }
 
-void Client::handleFileChunkSending(const Event &event, void *)
-{
-  sendFileChunk(event.getDataObject());
-}
-
-void Client::handleFileReceiveCompleted(const Event &event, void *)
-{
-  onFileReceiveCompleted();
-}
-
-void Client::onFileReceiveCompleted()
-{
-  if (isReceivedFileSizeValid()) {
-    auto method = new TMethodJob<Client>(this, &Client::writeToDropDirThread);
-    m_writeToDropDirThread.reset(new Thread(method));
-  }
-}
-
 void Client::bindNetworkInterface(IDataSocket *socket) const
 {
   try {
@@ -728,61 +678,4 @@ void Client::bindNetworkInterface(IDataSocket *socket) const
 void Client::handleStopRetry(const Event &, void *)
 {
   m_args.m_restartable = false;
-}
-
-void Client::writeToDropDirThread(void *)
-{
-  LOG((CLOG_DEBUG "starting write to drop dir thread"));
-
-  while (m_screen->isFakeDraggingStarted()) {
-    ARCH->sleep(.1f);
-  }
-
-  DropHelper::writeToDir(m_screen->getDropTarget(), m_dragFileList, m_receivedFileData);
-}
-
-void Client::dragInfoReceived(uint32_t fileNum, std::string data)
-{
-  // TODO: fix duplicate function from CServer
-  if (!m_args.m_enableDragDrop) {
-    LOG((CLOG_DEBUG "drag drop not enabled, ignoring drag info."));
-    return;
-  }
-
-  DragInformation::parseDragInfo(m_dragFileList, fileNum, data);
-
-  m_screen->startDraggingFiles(m_dragFileList);
-}
-
-bool Client::isReceivedFileSizeValid()
-{
-  return m_expectedFileSize == m_receivedFileData.size();
-}
-
-void Client::sendFileToServer(const char *filename)
-{
-  if (m_sendFileThread) {
-    StreamChunker::interruptFile();
-  }
-
-  auto data = static_cast<void *>(const_cast<char *>(filename));
-  auto method = new TMethodJob<Client>(this, &Client::sendFileThread, data);
-  m_sendFileThread.reset(new Thread(method));
-}
-
-void Client::sendFileThread(void *filename)
-{
-  try {
-    auto *name = static_cast<char *>(filename);
-    StreamChunker::sendFile(name, m_events, this);
-  } catch (std::runtime_error &error) {
-    LOG((CLOG_ERR "failed sending file chunks: %s", error.what()));
-  }
-
-  m_sendFileThread.reset(nullptr);
-}
-
-void Client::sendDragInfo(uint32_t fileCount, std::string &info, size_t size)
-{
-  m_server->sendDragInfo(fileCount, info.c_str(), size);
 }

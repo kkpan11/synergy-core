@@ -75,17 +75,16 @@ public:
   explicit MainWindow();
   ~MainWindow() override;
 
-  CoreMode coreMode() const
+  [[nodiscard]] CoreMode coreMode() const
   {
     return m_coreProcess.mode();
   }
-  QString address() const;
   void open();
   ServerConfig &serverConfig()
   {
     return m_serverConfig;
   }
-  void autoAddScreen(const QString name);
+  void autoAddScreen(const QString &name);
 
   void hide();
 
@@ -130,26 +129,20 @@ private:
   void setupTrayIcon();
   void applyConfig();
   void setIcon();
-  bool checkForApp(int which, QString &app);
   void setStatus(const QString &status);
   void updateFromLogLine(const QString &line);
-  QString getIPAddresses() const;
-  void enableServer(bool enable);
-  void enableClient(bool enable);
+  [[nodiscard]] QString getIPAddresses() const;
   void checkConnected(const QString &line);
   void checkFingerprint(const QString &line);
-  QString getTimeStamp() const;
+  [[nodiscard]] QString getTimeStamp() const;
   void showEvent(QShowEvent *) override;
   void closeEvent(QCloseEvent *event) override;
   void secureSocket(bool secureSocket);
-  void windowStateChanged();
   void connectSlots();
-  void updateWindowTitle();
   void handleLogLine(const QString &line);
   void updateLocalFingerprint();
   void updateScreenName();
   void saveSettings();
-  QString configFilename();
   void showConfigureServer(const QString &message);
   void restoreWindow();
   void setupControls();
@@ -158,9 +151,9 @@ private:
   void showAndActivate();
   void showHostNameEditor();
   void setHostName();
-  void daemonIpcClientConnectFailed();
+  void daemonIpcClientConnectionFailed();
   void toggleCanRunCore(bool enableButtons);
-  void remoteHostChanged(const QString newRemoteHost);
+  void remoteHostChanged(const QString &newRemoteHost);
 
   /**
    * @brief trustedFingerprintDb get the fingerprintDb for the trusted clients or trusted servers.
